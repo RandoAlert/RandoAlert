@@ -7,6 +7,8 @@ import 'package:xml/xml.dart' as xml;
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_map_tile_caching/flutter_map_tile_caching.dart' as fmtc;
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:geocoding/geocoding.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -19,6 +21,90 @@ class AppConfig {
       'https://api.github.com/repos/$githubOwner/$githubRepo/issues?state=open&per_page=100';
   static const String createIssueUrl =
       'https://api.github.com/repos/$githubOwner/$githubRepo/issues';
+}
+
+// ========== SECURE STORAGE ==========
+class SecureTokenStorage {
+  static const String _key = 'github_token';
+  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+
+  static Future<String> getToken() async {
+    try {
+      return await _storage.read(key: _key) ?? '';
+    } catch (e) {
+      print('Erreur lecture token: $e');
+      return '';
+    }
+  }
+
+  static Future<void> saveToken(String token) async {
+    try {
+      if (token.isEmpty) {
+        await _storage.delete(key: _key);
+      } else {
+        await _storage.write(key: _key, value: token);
+      }
+    } catch (e) {
+      print('Erreur sauvegarde token: $e');
+    }
+  }
+
+  static Future<void> deleteToken() async {
+    try {
+      await _storage.delete(key: _key);
+    } catch (e) {
+      print('Erreur suppression token: $e');
+    }
+  }
+}
+
+// ========== GEOLOCATION SERVICE ==========
+class GeoLocationService {
+  static Future<String> getDepartementCode(LatLng position) async {
+    try {
+      final List<Placemark> placemarks = await placemarkFromCoordinates(
+        position.latitude,
+        position.longitude,
+      );
+
+      if (placemarks.isNotEmpty) {
+        final Placemark place = placemarks.first;
+        final String? postalCode = place.postalCode;
+
+        if (postalCode != null && postalCode.length >= 2) {
+          return postalCode.substring(0, 2);
+        }
+      }
+
+      return _approximateDepartement(position);
+    } catch (e) {
+      print('Erreur géolocalisation: $e');
+      return _approximateDepartement(position);
+    }
+  }
+
+  static String _approximateDepartement(LatLng position) {
+    final lat = position.latitude;
+    final lon = position.longitude;
+
+    // Approximation par région géographique (France)
+    if (lat >= 48.1 && lat <= 49.0 && lon >= 1.9 && lon <= 3.6) {
+      return '75'; // Paris
+    }
+    if (lat >= 44.5 && lat <= 46.5 && lon >= 3.5 && lon <= 6.0) {
+      return '69'; // Rhône
+    }
+    if (lat >= 47.2 && lat <= 48.9 && lon >= -5.5 && lon <= -1.5) {
+      return '35'; // Ille-et-Vilaine
+    }
+    if (lat >= 47.0 && lat <= 48.0 && lon >= -1.5 && lon <= -0.1) {
+      return '49'; // Maine-et-Loire
+    }
+    if (lat >= 43.0 && lat <= 45.0 && lon >= 5.0 && lon <= 8.0) {
+      return '06'; // Alpes-Maritimes
+    }
+    return '75'; // Défaut
+  }
 }
 
 // ========== SERVICES ==========
@@ -126,13 +212,6 @@ class GitHubService {
   }
 }
 
-class GeoService {
-  static Future<String> getDepartementCode(LatLng position) async {
-    // TODO: Implémenter vrai service de géolocalisation département
-    return '49'; // Force Maine-et-Loire pour test
-  }
-}
-
 class MeteoService {
   static Color getCouleurVigilance(String couleur) {
     switch (couleur.toLowerCase()) {
@@ -149,6 +228,18 @@ class MeteoService {
 
   static Color getTextColor(Color background) {
     return background == Colors.yellow ? Colors.black : Colors.white;
+  }
+
+  static Future<Map<String, dynamic>?> getWeatherAlerts(
+      String departement) async {
+    try {
+      // TODO: Intégrer avec Météo-France API ou OpenWeatherMap
+      // https://api.meteofrance.com/v3/forecast/current?lat=X&lon=Y
+      return null;
+    } catch (e) {
+      print('Erreur météo: $e');
+      return null;
+    }
   }
 }
 
@@ -342,11 +433,12 @@ class _CartePageState extends State<CartePage> {
   List<Signalement> _signalements = [];
   String? _alerteMeteo;
   Color _couleurAlerte = Colors.transparent;
-  String _departementActuel = '49';
+  String _departementActuel = '75';
 
   @override
   void initState() {
     super.initState();
+    _chargerTokenSauvegarde();
     _initialiserGPS();
     _chargerSignalements();
     _verifierAlerteMeteo();
@@ -357,6 +449,13 @@ class _CartePageState extends State<CartePage> {
         _chargerSignalements();
       }
     });
+  }
+
+  Future<void> _chargerTokenSauvegarde() async {
+    final token = await SecureTokenStorage.getToken();
+    if (mounted) {
+      setState(() => _githubToken = token);
+    }
   }
 
   Future<void> _initialiserGPS() async {
@@ -371,12 +470,20 @@ class _CartePageState extends State<CartePage> {
       Geolocator.getPositionStream(
         locationSettings:
             const LocationSettings(accuracy: LocationAccuracy.high),
-      ).listen((Position pos) {
+      ).listen((Position pos) async {
         if (mounted) {
           setState(() {
             _position = LatLng(pos.latitude, pos.longitude);
             _chargement = false;
           });
+
+          // Mettre à jour le département automatiquement
+          final dept =
+              await GeoLocationService.getDepartementCode(_position!);
+          if (mounted) {
+            setState(() => _departementActuel = dept);
+            _verifierAlerteMeteo();
+          }
         }
       });
     } catch (e) {
@@ -386,12 +493,16 @@ class _CartePageState extends State<CartePage> {
   }
 
   Future<void> _verifierAlerteMeteo() async {
-    if (mounted) {
-      setState(() {
-        _departementActuel = '49';
-        _alerteMeteo = "Vigilance orange en Maine-et-Loire";
-        _couleurAlerte = Colors.orange;
-      });
+    try {
+      // Fallback: afficher une alerte de démonstration
+      if (mounted) {
+        setState(() {
+          _alerteMeteo = "Vigilance orange en département $_departementActuel";
+          _couleurAlerte = Colors.orange;
+        });
+      }
+    } catch (e) {
+      print('Erreur météo: $e');
     }
   }
 
@@ -400,7 +511,6 @@ class _CartePageState extends State<CartePage> {
       final signalements = await GitHubService.chargerSignalements();
       if (mounted) {
         setState(() {
-          // Filtrer les signalements expirés
           _signalements =
               signalements.where((s) => !s.estExpire).toList();
         });
@@ -411,10 +521,12 @@ class _CartePageState extends State<CartePage> {
   }
 
   void _showSettingsDialog(BuildContext context) {
+    _tokenController.text = _githubToken;
+
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text("Paramètres GitHub"),
+        title: const Text("⚙️ Paramètres GitHub"),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -481,20 +593,48 @@ class _CartePageState extends State<CartePage> {
             onPressed: () => Navigator.pop(context),
             child: const Text("Annuler"),
           ),
+          if (_githubToken.isNotEmpty)
+            TextButton(
+              onPressed: () async {
+                await SecureTokenStorage.deleteToken();
+                if (mounted) {
+                  setState(() => _githubToken = '');
+                  _tokenController.clear();
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text("🗑️ Token supprimé"),
+                      backgroundColor: Colors.orange,
+                    ),
+                  );
+                }
+              },
+              child: const Text("Supprimer"),
+            ),
           ElevatedButton(
-            onPressed: () {
-              _githubToken = _tokenController.text.trim();
-              Navigator.pop(context);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(_githubToken.isEmpty
-                      ? "⚠️ Token vide"
-                      : "✅ Token sauvegardé"),
-                  backgroundColor: _githubToken.isEmpty
-                      ? Colors.orange
-                      : Colors.green,
-                ),
-              );
+            onPressed: () async {
+              final newToken = _tokenController.text.trim();
+              if (newToken.isEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text("⚠️ Token vide"),
+                    backgroundColor: Colors.orange,
+                  ),
+                );
+                return;
+              }
+
+              await SecureTokenStorage.saveToken(newToken);
+              if (mounted) {
+                setState(() => _githubToken = newToken);
+                Navigator.pop(context);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text("✅ Token sauvegardé de manière sécurisée"),
+                    backgroundColor: Colors.green,
+                  ),
+                );
+              }
             },
             child: const Text("Sauvegarder"),
           ),
@@ -844,7 +984,6 @@ ${_pointsGPX.map((p) => '      <trkpt lat="${p.position.latitude}" lon="${p.posi
                       return;
                     }
 
-                    // Afficher un loader
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
