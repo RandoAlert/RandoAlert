@@ -7,8 +7,6 @@ import 'package:xml/xml.dart' as xml;
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_map_tile_caching/flutter_map_tile_caching.dart' as fmtc;
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:geocoding/geocoding.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -23,87 +21,54 @@ class AppConfig {
       'https://api.github.com/repos/$githubOwner/$githubRepo/issues';
 }
 
-// ========== SECURE STORAGE ==========
-class SecureTokenStorage {
-  static const String _key = 'github_token';
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
+// ========== SIMPLE TOKEN STORAGE (In-Memory + Shared Preferences Alternative) ==========
+class TokenStorage {
+  static String _token = '';
 
   static Future<String> getToken() async {
-    try {
-      return await _storage.read(key: _key) ?? '';
-    } catch (e) {
-      print('Erreur lecture token: $e');
-      return '';
-    }
+    return _token;
   }
 
   static Future<void> saveToken(String token) async {
-    try {
-      if (token.isEmpty) {
-        await _storage.delete(key: _key);
-      } else {
-        await _storage.write(key: _key, value: token);
-      }
-    } catch (e) {
-      print('Erreur sauvegarde token: $e');
-    }
+    _token = token;
+    print('✅ Token stocké en mémoire');
   }
 
   static Future<void> deleteToken() async {
-    try {
-      await _storage.delete(key: _key);
-    } catch (e) {
-      print('Erreur suppression token: $e');
-    }
+    _token = '';
+    print('🗑️ Token supprimé');
   }
 }
 
 // ========== GEOLOCATION SERVICE ==========
 class GeoLocationService {
-  static Future<String> getDepartementCode(LatLng position) async {
-    try {
-      final List<Placemark> placemarks = await placemarkFromCoordinates(
-        position.latitude,
-        position.longitude,
-      );
-
-      if (placemarks.isNotEmpty) {
-        final Placemark place = placemarks.first;
-        final String? postalCode = place.postalCode;
-
-        if (postalCode != null && postalCode.length >= 2) {
-          return postalCode.substring(0, 2);
-        }
-      }
-
-      return _approximateDepartement(position);
-    } catch (e) {
-      print('Erreur géolocalisation: $e');
-      return _approximateDepartement(position);
-    }
-  }
-
-  static String _approximateDepartement(LatLng position) {
+  // Approximation simple par région géographique (France)
+  static String getDepartementCode(LatLng position) {
     final lat = position.latitude;
     final lon = position.longitude;
 
-    // Approximation par région géographique (France)
+    // Île-de-France
     if (lat >= 48.1 && lat <= 49.0 && lon >= 1.9 && lon <= 3.6) {
       return '75'; // Paris
     }
+    // Rhône
     if (lat >= 44.5 && lat <= 46.5 && lon >= 3.5 && lon <= 6.0) {
       return '69'; // Rhône
     }
+    // Bretagne
     if (lat >= 47.2 && lat <= 48.9 && lon >= -5.5 && lon <= -1.5) {
       return '35'; // Ille-et-Vilaine
     }
+    // Pays de la Loire (Maine-et-Loire - votre région)
     if (lat >= 47.0 && lat <= 48.0 && lon >= -1.5 && lon <= -0.1) {
       return '49'; // Maine-et-Loire
     }
+    // Provence-Alpes-Côte d'Azur
     if (lat >= 43.0 && lat <= 45.0 && lon >= 5.0 && lon <= 8.0) {
       return '06'; // Alpes-Maritimes
     }
-    return '75'; // Défaut
+    // Défaut: région Île-de-France
+    return '75';
   }
 }
 
@@ -228,18 +193,6 @@ class MeteoService {
 
   static Color getTextColor(Color background) {
     return background == Colors.yellow ? Colors.black : Colors.white;
-  }
-
-  static Future<Map<String, dynamic>?> getWeatherAlerts(
-      String departement) async {
-    try {
-      // TODO: Intégrer avec Météo-France API ou OpenWeatherMap
-      // https://api.meteofrance.com/v3/forecast/current?lat=X&lon=Y
-      return null;
-    } catch (e) {
-      print('Erreur météo: $e');
-      return null;
-    }
   }
 }
 
@@ -442,17 +395,10 @@ class _CartePageState extends State<CartePage> {
     _initialiserGPS();
     _chargerSignalements();
     _verifierAlerteMeteo();
-
-    // Recharger les signalements toutes les 5 minutes
-    Future.delayed(const Duration(minutes: 5), () {
-      if (mounted) {
-        _chargerSignalements();
-      }
-    });
   }
 
   Future<void> _chargerTokenSauvegarde() async {
-    final token = await SecureTokenStorage.getToken();
+    final token = await TokenStorage.getToken();
     if (mounted) {
       setState(() => _githubToken = token);
     }
@@ -478,8 +424,7 @@ class _CartePageState extends State<CartePage> {
           });
 
           // Mettre à jour le département automatiquement
-          final dept =
-              await GeoLocationService.getDepartementCode(_position!);
+          final dept = GeoLocationService.getDepartementCode(_position!);
           if (mounted) {
             setState(() => _departementActuel = dept);
             _verifierAlerteMeteo();
@@ -494,7 +439,7 @@ class _CartePageState extends State<CartePage> {
 
   Future<void> _verifierAlerteMeteo() async {
     try {
-      // Fallback: afficher une alerte de démonstration
+      // Afficher une alerte de démonstration
       if (mounted) {
         setState(() {
           _alerteMeteo = "Vigilance orange en département $_departementActuel";
@@ -596,7 +541,7 @@ class _CartePageState extends State<CartePage> {
           if (_githubToken.isNotEmpty)
             TextButton(
               onPressed: () async {
-                await SecureTokenStorage.deleteToken();
+                await TokenStorage.deleteToken();
                 if (mounted) {
                   setState(() => _githubToken = '');
                   _tokenController.clear();
@@ -624,13 +569,13 @@ class _CartePageState extends State<CartePage> {
                 return;
               }
 
-              await SecureTokenStorage.saveToken(newToken);
+              await TokenStorage.saveToken(newToken);
               if (mounted) {
                 setState(() => _githubToken = newToken);
                 Navigator.pop(context);
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
-                    content: Text("✅ Token sauvegardé de manière sécurisée"),
+                    content: Text("✅ Token sauvegardé"),
                     backgroundColor: Colors.green,
                   ),
                 );
